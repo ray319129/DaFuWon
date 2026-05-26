@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   isFirebaseConfigured, 
   db, 
@@ -42,7 +42,23 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [urlRoomCode, setUrlRoomCode] = useState<string>('');
 
-  // 1. Initial mounting checks (parse URL query, parse sessionStorage/localStorage Session)
+  // Refs to prevent state leaks, double subscriptions, and stale closures
+  const subCleanupRef = useRef<(() => void) | null>(null);
+  const transactionsRef = useRef<Transaction[]>([]);
+
+  // Keep transaction ref updated
+  useEffect(() => {
+    transactionsRef.current = transactions;
+  }, [transactions]);
+
+  // Cleanup active subscriptions on unmount
+  useEffect(() => {
+    return () => {
+      subCleanupRef.current?.();
+    };
+  }, []);
+
+  // 1. Initial mounting checks (parse URL query, parse sessionStorage Session)
   useEffect(() => {
     // Parse invite code in Url e.g., ?room=123456
     const params = new URLSearchParams(window.location.search);
@@ -52,10 +68,9 @@ export default function App() {
     }
 
     // Recover previous identity session (Disconnect Reconnection mechanism)
-    // tab-specific sessionStorage takes precedence to avoid cross-tab collision
-    const sessionStored = sessionStorage.getItem(SESSION_KEY);
-    const localStored = localStorage.getItem(SESSION_KEY);
-    const stored = sessionStored || localStored;
+    // We only use tab-specific sessionStorage on boot to avoid cross-tab collision/overwrites
+    // when a host and guest are tested on the same browser/device.
+    const stored = sessionStorage.getItem(SESSION_KEY);
 
     if (stored) {
       try {
@@ -175,6 +190,15 @@ export default function App() {
   const subscribeToRoom = (roomId: string, myPlayerId: string) => {
     if (!db) return;
 
+    // Clear any previous active subscriptions before starting new ones to avoid duplicate subscription leaks
+    if (subCleanupRef.current) {
+      try {
+        subCleanupRef.current();
+      } catch (err) {
+        console.warn("Error cleaning up previous subscription:", err);
+      }
+    }
+
     // A. Subscribe to Room State Change
     const roomRef = doc(db, 'rooms', roomId);
     const unsubRoom = onSnapshot(roomRef, (snapshot) => {
@@ -212,8 +236,9 @@ export default function App() {
       // Sort descending by timestamp
       txList.sort((a, b) => b.timestamp - a.timestamp);
       
-      // Sound feedback threshold checking: If a new transaction arrives, trigger coin effect!
-      if (transactions.length > 0 && txList.length > transactions.length) {
+      // Sound feedback threshold checking using ref to bypass stale React closure bounds
+      const currentTxLength = transactionsRef.current.length;
+      if (currentTxLength > 0 && txList.length > currentTxLength) {
         const latestTx = txList[0];
         if (latestTx.toId === myPlayerId) {
           playCoinSound();
@@ -234,12 +259,15 @@ export default function App() {
     window.addEventListener('beforeunload', handleUnload);
 
     // Keep clean ups
-    return () => {
+    const cleanup = () => {
       unsubRoom();
       unsubPlayers();
       unsubTxs();
       window.removeEventListener('beforeunload', handleUnload);
     };
+
+    subCleanupRef.current = cleanup;
+    return cleanup;
   };
 
   // 4. Create Room Event Action
@@ -886,6 +914,16 @@ export default function App() {
 
   // Leave active room context
   const handleLeaveRoom = async () => {
+    // Clean up active Firestore subscribers immediately
+    if (subCleanupRef.current) {
+      try {
+        subCleanupRef.current();
+      } catch (err) {
+        console.warn("Error releasing listeners on room leave:", err);
+      }
+      subCleanupRef.current = null;
+    }
+
     if (room && currentPlayerId) {
       try {
         if (isFirebaseReady && db) {
