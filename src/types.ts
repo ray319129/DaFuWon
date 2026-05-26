@@ -19,7 +19,7 @@ export interface Room {
   id: string; // 6-digit room code, e.g. "123456"
   name: string;
   initialBalance: number;
-  status: 'lobby' | 'playing';
+  status: 'lobby' | 'playing' | 'settled';
   bankerPlayerId: string;
   createdAt: number;
   updatedAt: number;

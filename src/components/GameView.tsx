@@ -50,6 +50,8 @@ interface GameViewProps {
   onUnmortgageProperty: (propertyId: string) => void;
   onPayRent: (propertyId: string) => void;
   onTransferDeed: (propertyId: string, toPlayerId: string) => void;
+  onSettleGame: () => void;
+  onResumeGame: () => void;
 }
 
 export default function GameView({
@@ -70,7 +72,9 @@ export default function GameView({
   onMortgageProperty,
   onUnmortgageProperty,
   onPayRent,
-  onTransferDeed
+  onTransferDeed,
+  onSettleGame,
+  onResumeGame
 }: GameViewProps) {
   const [activeTab, setActiveTab] = useState<'account' | 'properties' | 'trends' | 'leaderboard' | 'banker'>('account');
   
@@ -122,6 +126,203 @@ export default function GameView({
 
   const myPropsValue = getPlayerPropertiesValue(me.id);
   const myNetWorth = me.balance + myPropsValue;
+
+  if (room.status === 'settled') {
+    const rankedPlayers = [...players].map(p => {
+      const propsValue = getPlayerPropertiesValue(p.id);
+      const netWorth = p.balance + propsValue;
+      const ownedDeeds = properties.filter(prop => prop.ownerId === p.id);
+      return {
+        ...p,
+        propsValue,
+        netWorth,
+        ownedDeeds
+      };
+    }).sort((a, b) => b.netWorth - a.netWorth);
+
+    const winner = rankedPlayers[0];
+
+    return (
+      <div id="settlement-stage" className="w-full max-w-md mx-auto px-4 py-6 space-y-6">
+        {/* Settlement Certificate Header */}
+        <div className="text-center space-y-2">
+          <div className="inline-block bg-amber-100 border-2 border-amber-405 text-amber-800 text-[10px] tracking-widest uppercase px-3 py-1 rounded-full shadow-[1.5px_1.5px_0px_0px_#000]">
+            🏆 最終富豪大亨資產點交 🏆
+          </div>
+          <h1 className="text-2xl font-black text-black leading-tight drop-shadow-sm">
+            本局大富翁遊戲已宣告結算
+          </h1>
+          <p className="text-xs text-gray-400 font-semibold">
+            房代碼: {room.id} • 最終資產與加冕排行榜
+          </p>
+        </div>
+
+        {/* Winner Highlight Stage */}
+        {winner && (
+          <div className="bg-gradient-to-br from-amber-500 to-amber-600 border-4 border-black p-5 rounded-2xl shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] text-white text-center relative overflow-hidden">
+            <div className="absolute inset-0 bg-white/10 pointer-events-none" />
+            <div className="absolute top-2 left-2 text-2xl opacity-40">✨</div>
+            <div className="absolute bottom-2 right-2 text-2xl opacity-40">✨</div>
+
+            <span className="text-[10px] font-mono font-extrabold uppercase tracking-widest bg-black/20 border border-white/20 px-2.5 py-0.5 rounded-full inline-block">
+              👑 ULTIMATE TYCOON WINNER 👑
+            </span>
+
+            {/* Avatar block */}
+            <div className="my-4 mx-auto w-20 h-20 rounded-2xl bg-white border-4 border-black flex items-center justify-center text-5xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transform rotate-[-3deg]">
+              {winner.avatar}
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-xl font-black text-yellow-105 block drop-shadow-sm">
+                「{winner.name}」
+              </span>
+              <p className="text-xs text-amber-50 font-medium">
+                以最卓越的投資思維及最高累積淨資產榮登第一！
+              </p>
+            </div>
+
+            {/* Total assets showcase */}
+            <div className="mt-5 bg-black/20 border-t-2 border-dashed border-white/20 pt-4 flex justify-between items-center text-left">
+              <div>
+                <span className="block text-[8px] font-mono uppercase tracking-wider text-amber-100">
+                  行長金庫核算總淨資產
+                </span>
+                <span className="text-3xl font-black font-mono tracking-tight text-white drop-shadow">
+                  ${winner.netWorth.toLocaleString()}
+                </span>
+              </div>
+              <div className="text-right shrink-0">
+                <span className="block text-[8px] font-mono tracking-wider text-amber-200">
+                  ( 💰 ${winner.balance.toLocaleString()} + 🏠 ${winner.propsValue.toLocaleString()} )
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Ledger rankings grid */}
+        <div className="space-y-3">
+          <h3 className="text-xs font-mono font-bold text-gray-500 uppercase tracking-widest px-1">
+            大亨資產最後總排行細目
+          </h3>
+          
+          <div className="space-y-2.5">
+            {rankedPlayers.map((plr, idx) => {
+              const propsValue = plr.propsValue;
+              const netWorth = plr.netWorth;
+              
+              // Medals representation
+              const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🎖️';
+              
+              return (
+                <div 
+                  key={plr.id}
+                  className={`border-2 border-black p-3.5 rounded-xl bg-white shadow-[2.5px_2.5px_0px_0px_#000] space-y-2.5 ${
+                    plr.id === me.id ? 'bg-amber-50/40 ring-2 ring-amber-400' : ''
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xl font-black font-mono text-gray-800">{medal}</span>
+                      <div className={`w-8 h-8 rounded bg-gradient-to-br ${plr.color} border-2 border-black flex items-center justify-center text-lg shadow-sm shrink-0`}>
+                        {plr.avatar}
+                      </div>
+                      <div>
+                        <span className="font-extrabold text-xs text-black block truncate mr-1">
+                          {plr.name} {plr.id === me.id && <span className="text-[#008F4C] bg-emerald-50 text-[9px] px-1 py-0.2 rounded font-bold border border-emerald-250">您</span>}
+                        </span>
+                        <span className="text-[8px] text-gray-400 block font-semibold leading-none">
+                          Rank #{idx + 1} • {plr.isBanker ? '銀行行長' : '大亨玩家'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] text-gray-400 font-bold block leading-none">最終總資產 Value</span>
+                      <span className="text-sm font-black font-mono text-emerald-800 block">
+                        ${netWorth.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Micro breakdown table */}
+                  <div className="grid grid-cols-2 gap-2 bg-gray-50 border border-gray-200 p-2 rounded-lg text-[10px] items-center">
+                    <div className="flex items-center space-x-1 justify-between pr-2 border-r border-gray-200">
+                      <span className="text-gray-400 font-bold">💰 現金餘額</span>
+                      <span className="font-mono font-black text-gray-700">${plr.balance.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center space-x-1 justify-between pl-1">
+                      <span className="text-gray-400 font-bold">🏠 房產點收</span>
+                      <span className="font-mono font-black text-gray-700">${propsValue.toLocaleString()}</span>
+                    </div>
+                  </div>
+
+                  {/* Property deeds portfolio */}
+                  {plr.ownedDeeds.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[8px] font-mono text-gray-400 font-bold block uppercase tracking-wide">
+                        旗下持產權證書 ({plr.ownedDeeds.length}):
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {plr.ownedDeeds.map(d => (
+                          <span 
+                            key={d.id}
+                            className={`text-[9px] font-black border border-black bg-gradient-to-br ${d.groupColor} text-white px-1.5 py-0.5 rounded shadow-sm`}
+                          >
+                            {d.name} {d.houses > 0 && `(x${d.houses})`}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Controls block (Available based on banker or player context) */}
+        <div className="bg-neutral-50 border-2 border-dashed border-gray-300 rounded-xl p-4 text-center space-y-3">
+          {isBanker ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-center space-x-2">
+                <span className="inline-block bg-rose-100 text-rose-800 text-[10px] font-bold px-2 py-0.5 rounded">
+                  🛡️ 銀行監管控制
+                </span>
+                <span className="text-gray-500 text-[10px] font-bold">您是房主行長，可以管理本局終端</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  id="btn-resume-settled"
+                  onClick={onResumeGame}
+                  className="bg-white hover:bg-neutral-100 text-black font-black text-xs py-2.5 rounded-lg border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-y-[1px] transition-all cursor-pointer"
+                >
+                  🔙 返回繼續本局
+                </button>
+                <button
+                  id="btn-reboot-settled"
+                  onClick={() => {
+                    if (confirm("確定重新指派初始大金庫，重設下一新局？這將重歸玩家初始金並洗淨所有地產產權。")) {
+                      onResetGame();
+                      onResumeGame();
+                    }
+                  }}
+                  className="bg-yellow-400 hover:bg-yellow-500 text-black font-black text-xs py-2.5 rounded-lg border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-y-[1px] transition-all cursor-pointer"
+                >
+                  🌟 重新開始新局
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="py-2 flex items-center justify-center space-x-2 text-xs text-gray-400 font-bold">
+              <span className="animate-pulse bg-amber-400 w-2 h-2 rounded-full inline-block"></span>
+              <span>本局大富翁已封盤結算，靜候房主行長重啟新局或返回...</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   const handleTransferSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -670,6 +871,7 @@ export default function GameView({
               onBankTake={onBankTake}
               onBankSet={onBankSet}
               onResetGame={onResetGame}
+              onSettleGame={onSettleGame}
             />
           ) : (
             <div className="bg-white border-4 border-black rounded-2xl p-6 shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] text-center py-10 space-y-3">

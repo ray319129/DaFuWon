@@ -15,6 +15,7 @@ interface BankerDashboardProps {
   onBankTake: (playerIdFrom: string, amount: number) => void;
   onBankSet: (playerId: string, exactAmount: number) => void;
   onResetGame: () => void;
+  onSettleGame: () => void;
 }
 
 export default function BankerDashboard({
@@ -23,7 +24,8 @@ export default function BankerDashboard({
   onBankGive,
   onBankTake,
   onBankSet,
-  onResetGame
+  onResetGame,
+  onSettleGame
 }: BankerDashboardProps) {
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [amountStr, setAmountStr] = useState('');
@@ -287,8 +289,33 @@ export default function BankerDashboard({
       {/* Admin Reset Box */}
       <div className="pt-4 border-t border-gray-200 space-y-3">
         <h4 className="text-xs font-mono font-bold text-gray-400 uppercase tracking-widest px-1">
-          系統危險管制區
+          系統危險與端局管理
         </h4>
+
+        {/* Manual Settlement Action */}
+        <div className="bg-gradient-to-br from-yellow-50 to-amber-50 border-2 border-yellow-300 rounded-xl p-4 space-y-2.5 shadow-[2px_2px_0px_0px_#000]">
+          <div className="flex items-start space-x-2">
+            <span className="text-xl mt-0.5">🏆</span>
+            <div>
+              <span className="text-xs font-extrabold text-amber-950 block">終局富豪大亨資產手動結算</span>
+              <span className="text-[10px] text-amber-850 block mt-0.5 leading-relaxed">
+                行長可一鍵對全體玩家進行最終財富點收（現金 + 地產及增建估值），排出最終富豪名次，並為第一名加冕大亨！
+              </span>
+            </div>
+          </div>
+          <button
+            id="btn-trigger-manual-settle"
+            type="button"
+            onClick={() => {
+              if (confirm("確定要進行最終大富翁結算點收嗎？這將即時揭示最終成績並廣播給全體在線玩家。")) {
+                onSettleGame();
+              }
+            }}
+            className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-extrabold text-xs py-2.5 px-4 rounded-xl border-2 border-black flex items-center justify-center space-x-2 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-y-[1px] active:shadow-none transition-all cursor-pointer"
+          >
+            <span>🏁 啟動手動結算，結算全盤資產 ➔</span>
+          </button>
+        </div>
 
         {showResetConfirm ? (
           <div className="bg-orange-50 border-2 border-orange-300 rounded-xl p-4 space-y-3">

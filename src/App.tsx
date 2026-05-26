@@ -1599,7 +1599,7 @@ export default function App() {
     }
   };
 
-  // 11. Action: RESET GAME (All players back to initialAmount, wipe transactions)
+  // 11. Action: RESET GAME (All players back to initialAmount, wipe transactions, clear properties)
   const handleResetGame = async () => {
     if (!room) return;
     try {
@@ -1607,9 +1607,12 @@ export default function App() {
         const roomRefId = room.id;
         const initialAmt = room.initialBalance;
 
-        // Fetch all players
+        // Fetch all players & properties
         const playersRef = collection(db, 'rooms', roomRefId, 'players');
         const pSnap = await getDocs(playersRef);
+
+        const propertiesRef = collection(db, 'rooms', roomRefId, 'properties');
+        const propSnap = await getDocs(propertiesRef);
 
         await runTransaction(db, async (transaction) => {
           pSnap.forEach((pDoc) => {
@@ -1617,9 +1620,15 @@ export default function App() {
             transaction.update(pDocRef, { balance: initialAmt });
           });
 
-          // Delete all records of transactions
-          // Note: Standard Firestore transactions are write-only additions.
-          // Since deleting collections inside client is unsafe, we add a terminal 'reset' log.
+          propSnap.forEach((pDoc) => {
+            const pRef = pDoc.ref;
+            transaction.update(pRef, {
+              ownerId: null,
+              houses: 0,
+              isMortgaged: false
+            });
+          });
+
           const txId = 'tx_reset_' + Date.now();
           const txDocRef = doc(db, 'rooms', roomRefId, 'transactions', txId);
           const resetLog: Transaction = {
@@ -1642,6 +1651,9 @@ export default function App() {
         const resetPlrs = localPlayers.map(p => ({ ...p, balance: room.initialBalance }));
         localStorage.setItem(`local_players_${room.id}`, JSON.stringify(resetPlrs));
 
+        const initialProps = getInitialProperties();
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(initialProps));
+
         const txId = 'tx_reset_' + Date.now();
         const resetLog: Transaction = {
           id: txId,
@@ -1657,10 +1669,65 @@ export default function App() {
         localStorage.setItem(`local_txs_${room.id}`, JSON.stringify([resetLog]));
 
         setPlayers(resetPlrs);
+        setProperties(initialProps);
         setTransactions([resetLog]);
       }
     } catch (e) {
-      console.error(e);
+      console.error("Reset game failed:", e);
+    }
+  };
+
+  // 12. Action: SETTLE GAME (Update room status to 'settled')
+  const handleSettleGame = async () => {
+    if (!room) return;
+    try {
+      if (isFirebaseReady && db) {
+        const roomRef = doc(db, 'rooms', room.id);
+        await updateDoc(roomRef, { 
+          status: 'settled',
+          updatedAt: Date.now()
+        });
+      } else {
+        // Local emulation status
+        const localRoomsRaw = localStorage.getItem('local_monopoly_rooms') || '{}';
+        const localRooms = JSON.parse(localRoomsRaw);
+        if (localRooms[room.id]) {
+          localRooms[room.id].status = 'settled';
+          localRooms[room.id].updatedAt = Date.now();
+          localStorage.setItem('local_monopoly_rooms', JSON.stringify(localRooms));
+          
+          setRoom(localRooms[room.id]);
+        }
+      }
+    } catch (e) {
+      console.error("Settle game failed:", e);
+    }
+  };
+
+  // 13. Action: RESUME GAME (Update room status back to 'playing')
+  const handleResumeGame = async () => {
+    if (!room) return;
+    try {
+      if (isFirebaseReady && db) {
+        const roomRef = doc(db, 'rooms', room.id);
+        await updateDoc(roomRef, { 
+          status: 'playing',
+          updatedAt: Date.now()
+        });
+      } else {
+        // Local emulation status
+        const localRoomsRaw = localStorage.getItem('local_monopoly_rooms') || '{}';
+        const localRooms = JSON.parse(localRoomsRaw);
+        if (localRooms[room.id]) {
+          localRooms[room.id].status = 'playing';
+          localRooms[room.id].updatedAt = Date.now();
+          localStorage.setItem('local_monopoly_rooms', JSON.stringify(localRooms));
+          
+          setRoom(localRooms[room.id]);
+        }
+      }
+    } catch (e) {
+      console.error("Resume game failed:", e);
     }
   };
 
@@ -1785,6 +1852,8 @@ export default function App() {
             onUnmortgageProperty={handleUnmortgageProperty}
             onPayRent={handlePayPropertyRent}
             onTransferDeed={handleTransferPropertyDeed}
+            onSettleGame={handleSettleGame}
+            onResumeGame={handleResumeGame}
           />
         )}
       </main>
