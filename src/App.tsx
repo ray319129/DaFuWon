@@ -42,7 +42,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [urlRoomCode, setUrlRoomCode] = useState<string>('');
 
-  // 1. Initial mounting checks (parse URL query, parse localStorage Session)
+  // 1. Initial mounting checks (parse URL query, parse sessionStorage/localStorage Session)
   useEffect(() => {
     // Parse invite code in Url e.g., ?room=123456
     const params = new URLSearchParams(window.location.search);
@@ -52,7 +52,11 @@ export default function App() {
     }
 
     // Recover previous identity session (Disconnect Reconnection mechanism)
-    const stored = localStorage.getItem(SESSION_KEY);
+    // tab-specific sessionStorage takes precedence to avoid cross-tab collision
+    const sessionStored = sessionStorage.getItem(SESSION_KEY);
+    const localStored = localStorage.getItem(SESSION_KEY);
+    const stored = sessionStored || localStored;
+
     if (stored) {
       try {
         const { roomId, playerId } = JSON.parse(stored);
@@ -61,7 +65,7 @@ export default function App() {
           return;
         }
       } catch (e) {
-        console.error("Failed to restore session from local storage:", e);
+        console.error("Failed to restore session from storage:", e);
       }
     }
     setLoading(false);
@@ -163,6 +167,7 @@ export default function App() {
     
     // Fallback: Clear corrupted session
     localStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(SESSION_KEY);
     setLoading(false);
   };
 
@@ -292,8 +297,9 @@ export default function App() {
         await setDoc(roomRef, newRoom);
         await setDoc(creatorRef, creatorPlayer);
 
-        // Record locally
+        // Record locally (both sessionStorage and localStorage to support separate tabs on same browser/device)
         localStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: pin, playerId: myUid }));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: pin, playerId: myUid }));
         setCurrentPlayerId(myUid);
         setRoom(newRoom);
         
@@ -355,6 +361,7 @@ export default function App() {
         localStorage.setItem(`local_players_${pin}`, JSON.stringify(initPlayers));
         localStorage.setItem(`local_txs_${pin}`, JSON.stringify([]));
         localStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: pin, playerId: firstPlayer.id }));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: pin, playerId: firstPlayer.id }));
 
         setCurrentPlayerId(firstPlayer.id);
         setRoom(newLocalRoom);
@@ -423,6 +430,7 @@ export default function App() {
         await setDoc(playerRef, newPlayer);
 
         localStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: myUid }));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: myUid }));
         setCurrentPlayerId(myUid);
         setRoom(roomData);
 
@@ -458,6 +466,7 @@ export default function App() {
         localPlayers.push(newLocalPlayer);
         localStorage.setItem(`local_players_${targetRoomId}`, JSON.stringify(localPlayers));
         localStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: myLocalId }));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: myLocalId }));
 
         // Load logs
         const localTxsRaw = localStorage.getItem(`local_txs_${targetRoomId}`) || '[]';
@@ -896,6 +905,7 @@ export default function App() {
 
     // Clear local cache keys
     localStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(SESSION_KEY);
     setRoom(null);
     setPlayers([]);
     setTransactions([]);
@@ -905,10 +915,23 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#FDFBF7] flex flex-col items-center justify-center font-sans">
+      <div className="min-h-screen bg-[#FDFBF7] flex flex-col items-center justify-center font-sans px-4 text-center">
         <div className="w-16 h-16 border-4 border-dashed border-red-500 rounded-full animate-spin"></div>
         <p className="text-sm font-bold text-gray-700 mt-4">大富翁中央電子金庫讀取中...</p>
         <span className="text-xs text-gray-400 font-mono mt-1">RECOVERING SESSIONS AND LEDGERS</span>
+        
+        {/* Force clean button to recover from stuck state if any */}
+        <button 
+          id="btn-force-clear-session"
+          onClick={() => {
+            localStorage.removeItem(SESSION_KEY);
+            sessionStorage.removeItem(SESSION_KEY);
+            window.location.href = window.location.origin + window.location.pathname;
+          }}
+          className="mt-8 px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold font-mono tracking-wide rounded-xl border-2 border-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] active:translate-y-0.5 active:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] transition-all"
+        >
+          FORCE CLEAR SESSION & EXIT (若連線卡住)
+        </button>
       </div>
     );
   }
