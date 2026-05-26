@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Strict Default Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Standard hardeners
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Helper to extract fields
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // ----------------- Room Safety -----------------
+    function isValidRoom(data) {
+      return data.id is string && data.id.size() >= 4 && data.id.size() <= 10
+        && data.name is string && data.name.size() <= 100
+        && data.initialBalance is number && data.initialBalance >= 0 && data.initialBalance <= 100000000
+        && (data.status == 'lobby' || data.status == 'playing')
+        && data.bankerPlayerId is string && data.bankerPlayerId.size() <= 128
+        && data.createdAt is number
+        && data.updatedAt is number;
+    }
+
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId);
+      allow create: if isValidId(roomId) && isValidRoom(incoming());
+      
+      // Update rules: Room can be updated if fields match valid room formats
+      allow update: if isValidId(roomId) && isValidRoom(incoming());
+      
+      allow delete: if false; // Room deletion is disabled to protect gameplay safety
+
+      // ----------------- Player Safety -----------------
+      function isValidPlayer(data) {
+        return data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() >= 1 && data.name.size() <= 30
+          && data.avatar is string && data.avatar.size() <= 10
+          && data.color is string && data.color.size() <= 50
+          && data.balance is number && data.balance >= -100000000 && data.balance <= 100000000
+          && data.isBanker is bool
+          && data.isOnline is bool
+          && data.joinedAt is number;
+      }
+
+      match /players/{playerId} {
+        allow list, get: if isValidId(roomId) && isValidId(playerId);
+        
+        allow create: if isValidId(roomId) && isValidId(playerId) 
+          && isValidPlayer(incoming());
+          
+        allow update: if isValidId(roomId) && isValidId(playerId)
+          && isValidPlayer(incoming());
+          
+        allow delete: if false; // No player deletion during game
+      }
+
+      // ----------------- Transaction Log Safety -----------------
+      function isValidTransaction(data) {
+        return data.id is string && data.id.size() <= 128
+          && data.fromId is string && data.fromId.size() <= 128
+          && data.fromName is string && data.fromName.size() <= 50
+          && data.toId is string && data.toId.size() <= 128
+          && data.toName is string && data.toName.size() <= 50
+          && data.amount is number && data.amount > 0 && data.amount <= 100000000
+          && (data.type == 'bank_give' || data.type == 'bank_take' || data.type == 'transfer' || data.type == 'reset')
+          && data.timestamp is number;
+      }
+
+      match /transactions/{transactionId} {
+        allow list, get: if isValidId(roomId) && isValidId(transactionId);
+        
+        // Audit log entries can only be created. No updates or deletions are ever allowed to keep records honest
+        allow create: if isValidId(roomId) && isValidId(transactionId) && isValidTransaction(incoming());
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+  }
+}

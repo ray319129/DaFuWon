@@ -1,0 +1,8 @@
+{
+  "name": "大富翁電子銀行",
+  "description": "大富翁桌遊專用的多人即時電子銀行系統，取代紙鈔，支援房主即時同步金額、玩家轉帳、斷線自動重連。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
