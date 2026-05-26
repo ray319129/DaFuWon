@@ -62,6 +62,13 @@ service cloud.firestore {
         allow delete: if false; // No player deletion during game
       }
 
+      // ----------------- Property Ledger Safety -----------------
+      match /properties/{propertyId} {
+        allow list, get: if isValidId(roomId);
+        allow create, update: if isValidId(roomId) && isValidId(propertyId);
+        allow delete: if false; // Properties are immutable once created
+      }
+
       // ----------------- Transaction Log Safety -----------------
       function isValidTransaction(data) {
         return data.id is string && data.id.size() <= 128

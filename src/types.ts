@@ -36,4 +36,19 @@ export interface Transaction {
   timestamp: number;
 }
 
+export interface Property {
+  id: string;
+  name: string;
+  group: 'brown' | 'lightblue' | 'pink' | 'orange' | 'red' | 'yellow' | 'green' | 'blue' | 'railroad' | 'utility';
+  groupColor: string; // Tailwind class background gradient e.g. "from-amber-800 to-amber-950"
+  price: number;
+  houseCost: number; // cost to build one house
+  baseRent: number;
+  rentWithHouses: number[]; // e.g. [base, house1, house2, house3, house4, hotel]
+  ownerId: string | null;  // null = bank owned
+  houses: number; // 0-4 houses, 5 = hotel
+  isMortgaged: boolean;
+  order: number;
+}
+
 export type ViewState = 'home' | 'create_room' | 'join_room' | 'lobby' | 'game' | 'banker_panel';

@@ -22,12 +22,13 @@ import {
   runTransaction 
 } from 'firebase/firestore';
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { Player, Room, Transaction, ViewState } from './types';
+import { Player, Room, Transaction, ViewState, Property } from './types';
 import CreateJoinView from './components/CreateJoinView';
 import LobbyView from './components/LobbyView';
 import GameView from './components/GameView';
 import { playCoinSound, playUpgradeSound } from './utils/audio';
 import { Landmark, Sparkles, HelpCircle } from 'lucide-react';
+import { getInitialProperties, calculateRent } from './utils/monopolyData';
 
 const SESSION_KEY = 'monopoly_banking_session';
 
@@ -36,6 +37,7 @@ export default function App() {
   const [room, setRoom] = useState<Room | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [properties, setProperties] = useState<Property[]>([]);
   const [currentPlayerId, setCurrentPlayerId] = useState<string>('');
   
   const [isFirebaseReady, setIsFirebaseReady] = useState(isFirebaseConfigured);
@@ -169,6 +171,16 @@ export default function App() {
               setRoom(activeRoom);
               setPlayers(updated);
               setTransactions(txsRaw ? JSON.parse(txsRaw) : []);
+              
+              const localPropsRaw = localStorage.getItem(`local_properties_${roomId}`);
+              if (localPropsRaw) {
+                setProperties(JSON.parse(localPropsRaw));
+              } else {
+                const initialProps = getInitialProperties();
+                localStorage.setItem(`local_properties_${roomId}`, JSON.stringify(initialProps));
+                setProperties(initialProps);
+              }
+
               setCurrentPlayerId(playerId);
               setViewState(activeRoom.status === 'lobby' ? 'lobby' : 'game');
               setLoading(false);
@@ -281,6 +293,42 @@ export default function App() {
       handleFirestoreError(error, OperationType.LIST, `rooms/${roomId}/transactions`);
     });
 
+    // D. Subscribe to properties subcollection
+    const propertiesRef = collection(db, 'rooms', roomId, 'properties');
+    const unsubProps = onSnapshot(propertiesRef, async (snapshot) => {
+      if (snapshot.empty) {
+        // Seed default deeds if we are the banker (owner) of the room
+        const roomRef = doc(db, 'rooms', roomId);
+        const roomSnap = await getDoc(roomRef);
+        if (roomSnap.exists()) {
+          const roomData = roomSnap.data() as Room;
+          if (roomData.bankerPlayerId === myPlayerId) {
+            const initialProps = getInitialProperties();
+            try {
+              // Batch seed properties
+              await Promise.all(
+                initialProps.map((p) => {
+                  const pRef = doc(db, 'rooms', roomId, 'properties', p.id);
+                  return setDoc(pRef, p);
+                })
+              );
+            } catch (err) {
+              console.error("Failed to seed initial properties:", err);
+            }
+          }
+        }
+        return;
+      }
+      const propList: Property[] = [];
+      snapshot.forEach(docSnap => {
+        propList.push(docSnap.data() as Property);
+      });
+      propList.sort((a, b) => a.order - b.order);
+      setProperties(propList);
+    }, (error) => {
+      console.warn("Properties snapshot warning:", error);
+    });
+
     // Handle offline status mappings
     const handleUnload = () => {
       if (db) {
@@ -295,6 +343,7 @@ export default function App() {
       unsubRoom();
       unsubPlayers();
       unsubTxs();
+      unsubProps();
       window.removeEventListener('beforeunload', handleUnload);
     };
 
@@ -646,6 +695,16 @@ export default function App() {
 
         const localTxsRaw = localStorage.getItem(`local_txs_${targetRoomId}`) || '[]';
         setTransactions(JSON.parse(localTxsRaw));
+        
+        const localPropsRaw = localStorage.getItem(`local_properties_${targetRoomId}`);
+        if (localPropsRaw) {
+          setProperties(JSON.parse(localPropsRaw));
+        } else {
+          const initialProps = getInitialProperties();
+          localStorage.setItem(`local_properties_${targetRoomId}`, JSON.stringify(initialProps));
+          setProperties(initialProps);
+        }
+
         setPlayers(localPlayers);
 
         setCurrentPlayerId(playerId);
@@ -691,6 +750,547 @@ export default function App() {
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  // 6.5 Real Estate Property Deeds Handlers
+  const handleBuyProperty = async (propertyId: string) => {
+    if (!room || !currentPlayerId) return;
+    const property = properties.find((p) => p.id === propertyId);
+    if (!property) return;
+    
+    const buyer = players.find(p => p.id === currentPlayerId);
+    if (!buyer) return;
+
+    if (buyer.balance < property.price) {
+      if (!confirm(`您的現金不足以購買 [${property.name}] ($${property.price}，您只有 $${buyer.balance})，確定要透支扣款以購買此產權嗎？`)) {
+        return;
+      }
+    }
+
+    try {
+      if (isFirebaseReady && db) {
+        const roomRefId = room.id;
+        await runTransaction(db, async (transaction) => {
+          const playerDocRef = doc(db, 'rooms', roomRefId, 'players', currentPlayerId);
+          const propDocRef = doc(db, 'rooms', roomRefId, 'properties', propertyId);
+          
+          const playerSnap = await transaction.get(playerDocRef);
+          const propSnap = await transaction.get(propDocRef);
+
+          if (!playerSnap.exists() || !propSnap.exists()) {
+            throw new Error("玩家或地產不存在。");
+          }
+
+          const playerData = playerSnap.data() as Player;
+          const propData = propSnap.data() as Property;
+
+          if (propData.ownerId) {
+            throw new Error("此地產已被他人購買！");
+          }
+
+          const newBalance = playerData.balance - propData.price;
+          transaction.update(playerDocRef, { balance: newBalance });
+          transaction.update(propDocRef, { ownerId: currentPlayerId });
+
+          // Log transaction
+          const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+          const txDocRef = doc(db, 'rooms', roomRefId, 'transactions', txId);
+          const newTx: Transaction = {
+            id: txId,
+            fromId: currentPlayerId,
+            fromName: playerData.name,
+            toId: 'bank',
+            toName: '銀行 (產權置產)',
+            amount: propData.price,
+            type: 'bank_take',
+            timestamp: Date.now()
+          };
+          transaction.set(txDocRef, newTx);
+        });
+        playCoinSound();
+      } else {
+        // Local Mode
+        const localPlayersRaw = localStorage.getItem(`local_players_${room.id}`) || '[]';
+        const localPlayers: Player[] = JSON.parse(localPlayersRaw);
+        const buyerIdx = localPlayers.findIndex(p => p.id === currentPlayerId);
+        
+        if (buyerIdx !== -1) {
+          localPlayers[buyerIdx].balance -= property.price;
+        }
+
+        const updatedProps = properties.map(p => {
+          if (p.id === propertyId) {
+            return { ...p, ownerId: currentPlayerId };
+          }
+          return p;
+        });
+
+        const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+        const localTxsRaw = localStorage.getItem(`local_txs_${room.id}`) || '[]';
+        const localTxs: Transaction[] = JSON.parse(localTxsRaw);
+        const newTx: Transaction = {
+          id: txId,
+          fromId: currentPlayerId,
+          fromName: buyer.name,
+          toId: 'bank',
+          toName: '銀行 (產權置產)',
+          amount: property.price,
+          type: 'bank_take',
+          timestamp: Date.now()
+        };
+        localTxs.unshift(newTx);
+
+        localStorage.setItem(`local_players_${room.id}`, JSON.stringify(localPlayers));
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(updatedProps));
+        localStorage.setItem(`local_txs_${room.id}`, JSON.stringify(localTxs));
+
+        setPlayers(localPlayers);
+        setProperties(updatedProps);
+        setTransactions(localTxs);
+        playCoinSound();
+      }
+    } catch (err) {
+      console.error("Buy property failed:", err);
+      alert("購買地產失敗：" + err);
+    }
+  };
+
+  const handleUpgradeProperty = async (propertyId: string) => {
+    if (!room || !currentPlayerId) return;
+    const property = properties.find((p) => p.id === propertyId);
+    if (!property) return;
+    if (property.ownerId !== currentPlayerId) return;
+
+    if (property.houses >= 5) {
+      alert("此地產已建設成豪華飯店，無法繼續加蓋囉！");
+      return;
+    }
+
+    const price = property.houseCost;
+    const builder = players.find(p => p.id === currentPlayerId);
+    if (!builder) return;
+
+    if (builder.balance < price) {
+      if (!confirm(`您的現金不足以增蓋客房 ($${price}，您只有 $${builder.balance})，確定要透支扣款以蓋房嗎？`)) {
+        return;
+      }
+    }
+
+    try {
+      if (isFirebaseReady && db) {
+        const roomRefId = room.id;
+        await runTransaction(db, async (transaction) => {
+          const playerDocRef = doc(db, 'rooms', roomRefId, 'players', currentPlayerId);
+          const propDocRef = doc(db, 'rooms', roomRefId, 'properties', propertyId);
+          
+          const playerSnap = await transaction.get(playerDocRef);
+          const propSnap = await transaction.get(propDocRef);
+
+          if (!playerSnap.exists() || !propSnap.exists()) {
+            throw new Error("玩家或地產不存在。");
+          }
+
+          const playerData = playerSnap.data() as Player;
+          const propData = propSnap.data() as Property;
+
+          const newBalance = playerData.balance - price;
+          const newHouses = propData.houses + 1;
+          transaction.update(playerDocRef, { balance: newBalance });
+          transaction.update(propDocRef, { houses: newHouses });
+
+          // Log transaction
+          const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+          const txDocRef = doc(db, 'rooms', roomRefId, 'transactions', txId);
+          const newTx: Transaction = {
+            id: txId,
+            fromId: currentPlayerId,
+            fromName: playerData.name,
+            toId: 'bank',
+            toName: '銀行 (地產建設費)',
+            amount: price,
+            type: 'bank_take',
+            timestamp: Date.now()
+          };
+          transaction.set(txDocRef, newTx);
+        });
+        playUpgradeSound();
+      } else {
+        // Local Mode
+        const localPlayersRaw = localStorage.getItem(`local_players_${room.id}`) || '[]';
+        const localPlayers: Player[] = JSON.parse(localPlayersRaw);
+        const builderIdx = localPlayers.findIndex(p => p.id === currentPlayerId);
+        
+        if (builderIdx !== -1) {
+          localPlayers[builderIdx].balance -= price;
+        }
+
+        const updatedProps = properties.map(p => {
+          if (p.id === propertyId) {
+            return { ...p, houses: p.houses + 1 };
+          }
+          return p;
+        });
+
+        const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+        const localTxsRaw = localStorage.getItem(`local_txs_${room.id}`) || '[]';
+        const localTxs: Transaction[] = JSON.parse(localTxsRaw);
+        const newTx: Transaction = {
+          id: txId,
+          fromId: currentPlayerId,
+          fromName: builder.name,
+          toId: 'bank',
+          toName: '銀行 (地產建設費)',
+          amount: price,
+          type: 'bank_take',
+          timestamp: Date.now()
+        };
+        localTxs.unshift(newTx);
+
+        localStorage.setItem(`local_players_${room.id}`, JSON.stringify(localPlayers));
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(updatedProps));
+        localStorage.setItem(`local_txs_${room.id}`, JSON.stringify(localTxs));
+
+        setPlayers(localPlayers);
+        setProperties(updatedProps);
+        setTransactions(localTxs);
+        playUpgradeSound();
+      }
+    } catch (err) {
+      console.error("Upgrade property failed:", err);
+      alert("升級建設失敗：" + err);
+    }
+  };
+
+  const handleMortgageProperty = async (propertyId: string) => {
+    if (!room || !currentPlayerId) return;
+    const property = properties.find((p) => p.id === propertyId);
+    if (!property) return;
+    if (property.ownerId !== currentPlayerId) return;
+    if (property.isMortgaged) return;
+
+    if (property.houses > 0) {
+      alert("此地產上蓋有房屋，抵押前必須先將房屋拆除售回（系統會自動將等級重設為0）！");
+    }
+
+    const payout = Math.floor(property.price / 2);
+
+    try {
+      if (isFirebaseReady && db) {
+        const roomRefId = room.id;
+        await runTransaction(db, async (transaction) => {
+          const playerDocRef = doc(db, 'rooms', roomRefId, 'players', currentPlayerId);
+          const propDocRef = doc(db, 'rooms', roomRefId, 'properties', propertyId);
+          
+          const playerSnap = await transaction.get(playerDocRef);
+          const propSnap = await transaction.get(propDocRef);
+
+          if (!playerSnap.exists() || !propSnap.exists()) {
+            throw new Error("玩家或地產不存在。");
+          }
+
+          const playerData = playerSnap.data() as Player;
+
+          const newBalance = playerData.balance + payout;
+          transaction.update(playerDocRef, { balance: newBalance });
+          transaction.update(propDocRef, { isMortgaged: true, houses: 0 });
+
+          // Log transaction
+          const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+          const txDocRef = doc(db, 'rooms', roomRefId, 'transactions', txId);
+          const newTx: Transaction = {
+            id: txId,
+            fromId: 'bank',
+            fromName: '銀行 (地產抵押部)',
+            toId: currentPlayerId,
+            toName: playerData.name,
+            amount: payout,
+            type: 'bank_give',
+            timestamp: Date.now()
+          };
+          transaction.set(txDocRef, newTx);
+        });
+        playCoinSound();
+      } else {
+        // Local Mode
+        const localPlayersRaw = localStorage.getItem(`local_players_${room.id}`) || '[]';
+        const localPlayers: Player[] = JSON.parse(localPlayersRaw);
+        const builderIdx = localPlayers.findIndex(p => p.id === currentPlayerId);
+        
+        let localPlayerName = "我";
+        if (builderIdx !== -1) {
+          localPlayers[builderIdx].balance += payout;
+          localPlayerName = localPlayers[builderIdx].name;
+        }
+
+        const updatedProps = properties.map(p => {
+          if (p.id === propertyId) {
+            return { ...p, isMortgaged: true, houses: 0 };
+          }
+          return p;
+        });
+
+        const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+        const localTxsRaw = localStorage.getItem(`local_txs_${room.id}`) || '[]';
+        const localTxs: Transaction[] = JSON.parse(localTxsRaw);
+        const newTx: Transaction = {
+          id: txId,
+          fromId: 'bank',
+          fromName: '銀行 (地產抵押部)',
+          toId: currentPlayerId,
+          toName: localPlayerName,
+          amount: payout,
+          type: 'bank_give',
+          timestamp: Date.now()
+        };
+        localTxs.unshift(newTx);
+
+        localStorage.setItem(`local_players_${room.id}`, JSON.stringify(localPlayers));
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(updatedProps));
+        localStorage.setItem(`local_txs_${room.id}`, JSON.stringify(localTxs));
+
+        setPlayers(localPlayers);
+        setProperties(updatedProps);
+        setTransactions(localTxs);
+        playCoinSound();
+      }
+    } catch (err) {
+      console.error("Mortgage property failed:", err);
+      alert("抵押地產失敗：" + err);
+    }
+  };
+
+  const handleUnmortgageProperty = async (propertyId: string) => {
+    if (!room || !currentPlayerId) return;
+    const property = properties.find((p) => p.id === propertyId);
+    if (!property) return;
+    if (property.ownerId !== currentPlayerId) return;
+    if (!property.isMortgaged) return;
+
+    // Unmortgage cost is (price/2) * 1.10 (mortgage cost + 10% interest)
+    const cost = Math.floor((property.price / 2) * 1.1);
+    const builder = players.find(p => p.id === currentPlayerId);
+    if (!builder) return;
+
+    if (builder.balance < cost) {
+      if (!confirm(`您的現金不足以贖回產權 ($${cost}，您只有 $${builder.balance})，確定要透支扣款以贖回嗎？`)) {
+        return;
+      }
+    }
+
+    try {
+      if (isFirebaseReady && db) {
+        const roomRefId = room.id;
+        await runTransaction(db, async (transaction) => {
+          const playerDocRef = doc(db, 'rooms', roomRefId, 'players', currentPlayerId);
+          const propDocRef = doc(db, 'rooms', roomRefId, 'properties', propertyId);
+          
+          const playerSnap = await transaction.get(playerDocRef);
+          const propSnap = await transaction.get(propDocRef);
+
+          if (!playerSnap.exists() || !propSnap.exists()) {
+            throw new Error("玩家或地產不存在。");
+          }
+
+          const playerData = playerSnap.data() as Player;
+
+          const newBalance = playerData.balance - cost;
+          transaction.update(playerDocRef, { balance: newBalance });
+          transaction.update(propDocRef, { isMortgaged: false });
+
+          // Log transaction
+          const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+          const txDocRef = doc(db, 'rooms', roomRefId, 'transactions', txId);
+          const newTx: Transaction = {
+            id: txId,
+            fromId: currentPlayerId,
+            fromName: playerData.name,
+            toId: 'bank',
+            toName: '銀行 (地產贖回登記)',
+            amount: cost,
+            type: 'bank_take',
+            timestamp: Date.now()
+          };
+          transaction.set(txDocRef, newTx);
+        });
+        playCoinSound();
+      } else {
+        // Local Mode
+        const localPlayersRaw = localStorage.getItem(`local_players_${room.id}`) || '[]';
+        const localPlayers: Player[] = JSON.parse(localPlayersRaw);
+        const builderIdx = localPlayers.findIndex(p => p.id === currentPlayerId);
+        
+        if (builderIdx !== -1) {
+          localPlayers[builderIdx].balance -= cost;
+        }
+
+        const updatedProps = properties.map(p => {
+          if (p.id === propertyId) {
+            return { ...p, isMortgaged: false };
+          }
+          return p;
+        });
+
+        const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+        const localTxsRaw = localStorage.getItem(`local_txs_${room.id}`) || '[]';
+        const localTxs: Transaction[] = JSON.parse(localTxsRaw);
+        const newTx: Transaction = {
+          id: txId,
+          fromId: currentPlayerId,
+          fromName: builder.name,
+          toId: 'bank',
+          toName: '銀行 (地產贖回登記)',
+          amount: cost,
+          type: 'bank_take',
+          timestamp: Date.now()
+        };
+        localTxs.unshift(newTx);
+
+        localStorage.setItem(`local_players_${room.id}`, JSON.stringify(localPlayers));
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(updatedProps));
+        localStorage.setItem(`local_txs_${room.id}`, JSON.stringify(localTxs));
+
+        setPlayers(localPlayers);
+        setProperties(updatedProps);
+        setTransactions(localTxs);
+        playCoinSound();
+      }
+    } catch (err) {
+      console.error("Unmortgage property failed:", err);
+      alert("贖回產權失敗：" + err);
+    }
+  };
+
+  const handlePayPropertyRent = async (propertyId: string) => {
+    if (!room || !currentPlayerId) return;
+    const property = properties.find((p) => p.id === propertyId);
+    if (!property || !property.ownerId || property.ownerId === currentPlayerId) return;
+
+    const owner = players.find(p => p.id === property.ownerId);
+    if (!owner) {
+      alert("找不到該土地的登記所有人！");
+      return;
+    }
+
+    const rentAmt = calculateRent(property, properties);
+    if (rentAmt <= 0) return;
+
+    const payer = players.find(p => p.id === currentPlayerId);
+    if (!payer) return;
+
+    if (payer.balance < rentAmt) {
+      if (!confirm(`過路費金額為 $${rentAmt}，您的賬上餘額 ($${payer.balance}) 不足，是否要強制進入「賒帳/負債」透支模式進行扣款？`)) {
+        return;
+      }
+    }
+
+    try {
+      if (isFirebaseReady && db) {
+        const roomRefId = room.id;
+        await runTransaction(db, async (transaction) => {
+          const payerRef = doc(db, 'rooms', roomRefId, 'players', currentPlayerId);
+          const ownerRef = doc(db, 'rooms', roomRefId, 'players', property.ownerId!);
+          
+          const payerSnap = await transaction.get(payerRef);
+          const ownerSnap = await transaction.get(ownerRef);
+
+          if (!payerSnap.exists() || !ownerSnap.exists()) {
+            throw new Error("玩家資料讀取異常。");
+          }
+
+          const payerData = payerSnap.data() as Player;
+          const ownerData = ownerSnap.data() as Player;
+
+          transaction.update(payerRef, { balance: payerData.balance - rentAmt });
+          transaction.update(ownerRef, { balance: ownerData.balance + rentAmt });
+
+          // Log transaction
+          const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+          const txDocRef = doc(db, 'rooms', roomRefId, 'transactions', txId);
+          const newTx: Transaction = {
+            id: txId,
+            fromId: currentPlayerId,
+            fromName: payerData.name,
+            toId: property.ownerId!,
+            toName: ownerData.name,
+            amount: rentAmt,
+            type: 'transfer',
+            timestamp: Date.now()
+          };
+          transaction.set(txDocRef, newTx);
+        });
+        playCoinSound();
+      } else {
+        // Local Mode
+        const localPlayersRaw = localStorage.getItem(`local_players_${room.id}`) || '[]';
+        const localPlayers: Player[] = JSON.parse(localPlayersRaw);
+        
+        const payerIdx = localPlayers.findIndex(p => p.id === currentPlayerId);
+        const ownerIdx = localPlayers.findIndex(p => p.id === property.ownerId);
+
+        if (payerIdx !== -1) localPlayers[payerIdx].balance -= rentAmt;
+        if (ownerIdx !== -1) localPlayers[ownerIdx].balance += rentAmt;
+
+        const txId = 'tx_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+        const localTxsRaw = localStorage.getItem(`local_txs_${room.id}`) || '[]';
+        const localTxs: Transaction[] = JSON.parse(localTxsRaw);
+        const newTx: Transaction = {
+          id: txId,
+          fromId: currentPlayerId,
+          fromName: payer.name,
+          toId: property.ownerId,
+          toName: owner.name,
+          amount: rentAmt,
+          type: 'transfer',
+          timestamp: Date.now()
+        };
+        localTxs.unshift(newTx);
+
+        localStorage.setItem(`local_players_${room.id}`, JSON.stringify(localPlayers));
+        localStorage.setItem(`local_txs_${room.id}`, JSON.stringify(localTxs));
+
+        setPlayers(localPlayers);
+        setTransactions(localTxs);
+        playCoinSound();
+      }
+    } catch (err) {
+      console.error("Pay rent failed:", err);
+      alert("支付過路費失敗：" + err);
+    }
+  };
+
+  const handleTransferPropertyDeed = async (propertyId: string, toPlayerId: string) => {
+    if (!room || !currentPlayerId) return;
+    const property = properties.find((p) => p.id === propertyId);
+    if (!property || property.ownerId !== currentPlayerId) return;
+
+    const targetUser = players.find(p => p.id === toPlayerId);
+    if (!targetUser) return;
+
+    if (!confirm(`確定要把 [${property.name}] 的地產契約產權轉讓給「${targetUser.name}」嗎？`)) {
+      return;
+    }
+
+    try {
+      if (isFirebaseReady && db) {
+        const roomRefId = room.id;
+        const propDocRef = doc(db, 'rooms', roomRefId, 'properties', propertyId);
+        await updateDoc(propDocRef, { ownerId: toPlayerId });
+      } else {
+        // Local Mode
+        const updatedProps = properties.map(p => {
+          if (p.id === propertyId) {
+            return { ...p, ownerId: toPlayerId };
+          }
+          return p;
+        });
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(updatedProps));
+        setProperties(updatedProps);
+      }
+      playUpgradeSound();
+    } catch (err) {
+      console.error("Transfer deed failed:", err);
+      alert("轉移地產產權失敗");
     }
   };
 
@@ -1170,6 +1770,7 @@ export default function App() {
             room={room}
             players={players}
             transactions={transactions}
+            properties={properties}
             currentPlayerId={currentPlayerId}
             onTransfer={handleTransfer}
             onBankGive={handleBankGive}
@@ -1178,6 +1779,12 @@ export default function App() {
             onResetGame={handleResetGame}
             onLeaveRoom={handleLeaveRoom}
             isFirebaseReady={isFirebaseReady}
+            onBuyProperty={handleBuyProperty}
+            onUpgradeProperty={handleUpgradeProperty}
+            onMortgageProperty={handleMortgageProperty}
+            onUnmortgageProperty={handleUnmortgageProperty}
+            onPayRent={handlePayPropertyRent}
+            onTransferDeed={handleTransferPropertyDeed}
           />
         )}
       </main>
