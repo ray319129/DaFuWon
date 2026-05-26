@@ -45,6 +45,7 @@ export default function App() {
   // Refs to prevent state leaks, double subscriptions, and stale closures
   const subCleanupRef = useRef<(() => void) | null>(null);
   const transactionsRef = useRef<Transaction[]>([]);
+  const tabSessionIdRef = useRef<string>('sess_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now().toString(36).substring(4));
 
   // Keep transaction ref updated
   useEffect(() => {
@@ -140,7 +141,7 @@ export default function App() {
             setRoom(roomData);
             
             // Mark online
-            await updateDoc(playerRef, { isOnline: true });
+            await updateDoc(playerRef, { isOnline: true, connectionId: tabSessionIdRef.current });
             
             // Initialize Firestore Live Snapshot Syncing
             subscribeToRoom(roomId, actualPlayerId);
@@ -162,7 +163,7 @@ export default function App() {
             
             if (isPlayerIn) {
               // Update player online state link
-              const updated = localPlayers.map(p => p.id === playerId ? { ...p, isOnline: true } : p);
+              const updated = localPlayers.map(p => p.id === playerId ? { ...p, isOnline: true, connectionId: tabSessionIdRef.current } : p);
               localStorage.setItem(`local_players_${roomId}`, JSON.stringify(updated));
               
               setRoom(activeRoom);
@@ -215,9 +216,40 @@ export default function App() {
     const playersRef = collection(db, 'rooms', roomId, 'players');
     const unsubPlayers = onSnapshot(playersRef, (snapshot) => {
       const pList: Player[] = [];
+      let wasKickedOut = false;
       snapshot.forEach(docSnap => {
-        pList.push(docSnap.data() as Player);
+        const p = docSnap.data() as Player;
+        pList.push(p);
+        
+        // If our current session has been superseded, trigger expulsion
+        if (p.id === myPlayerId && p.isOnline && p.connectionId && p.connectionId !== tabSessionIdRef.current) {
+          wasKickedOut = true;
+        }
       });
+
+      if (wasKickedOut) {
+        // Unsubscribe from active real-time updates immediately to prevent alerts or update loops
+        if (subCleanupRef.current) {
+          try {
+            subCleanupRef.current();
+          } catch (e) {
+            console.warn("Error cleaning up subscriptions upon replacement:", e);
+          }
+          subCleanupRef.current = null;
+        }
+
+        alert("您的玩家身份已在其他裝置上被「接管登入」！本視窗已自動回到大廳首頁。");
+        localStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(SESSION_KEY);
+        setRoom(null);
+        setPlayers([]);
+        setTransactions([]);
+        setCurrentPlayerId('');
+        setViewState('home');
+        setLoading(false);
+        return;
+      }
+
       // Sort players alphabetically or join time so layout stays stable
       pList.sort((a, b) => a.joinedAt - b.joinedAt);
       setPlayers(pList);
@@ -315,7 +347,8 @@ export default function App() {
           balance: initialBalance,
           isBanker: true,
           isOnline: true,
-          joinedAt: Date.now()
+          joinedAt: Date.now(),
+          connectionId: tabSessionIdRef.current
         };
 
         // Write to Firestore database
@@ -352,7 +385,8 @@ export default function App() {
           balance: initialBalance,
           isBanker: true,
           isOnline: true,
-          joinedAt: Date.now()
+          joinedAt: Date.now(),
+          connectionId: tabSessionIdRef.current
         };
 
         // Add 2 mock players so local practicing is immediate and fun!
@@ -450,7 +484,8 @@ export default function App() {
           balance: roomData.initialBalance,
           isBanker: isMeBanker,
           isOnline: true,
-          joinedAt: Date.now()
+          joinedAt: Date.now(),
+          connectionId: tabSessionIdRef.current
         };
 
         // Write document to players collection
@@ -488,7 +523,8 @@ export default function App() {
           balance: targetRoom.initialBalance,
           isBanker: targetRoom.bankerPlayerId === myLocalId,
           isOnline: true,
-          joinedAt: Date.now()
+          joinedAt: Date.now(),
+          connectionId: tabSessionIdRef.current
         };
 
         localPlayers.push(newLocalPlayer);
@@ -510,6 +546,122 @@ export default function App() {
     } catch (e) {
       console.error(e);
       alert("載入房間時發生阻礙，請確認網路連線！");
+      setLoading(false);
+    }
+  };
+
+  // 5.5 Player Takeover & Query Helpers
+  const getRoomPlayers = async (roomId: string): Promise<Player[]> => {
+    if (isFirebaseReady && db) {
+      try {
+        const playersColl = collection(db, 'rooms', roomId, 'players');
+        const snap = await getDocs(playersColl);
+        const list: Player[] = [];
+        snap.forEach((doc) => {
+          list.push(doc.data() as Player);
+        });
+        return list.sort((a, b) => a.joinedAt - b.joinedAt);
+      } catch (err) {
+        console.warn("Failed to fetch players for takeover:", err);
+        return [];
+      }
+    } else {
+      try {
+        const localPlayersRaw = localStorage.getItem(`local_players_${roomId}`) || '[]';
+        const list: Player[] = JSON.parse(localPlayersRaw);
+        return list.sort((a, b) => a.joinedAt - b.joinedAt);
+      } catch (err) {
+        return [];
+      }
+    }
+  };
+
+  const handleTakeoverPlayer = async (targetRoomId: string, playerId: string) => {
+    setLoading(true);
+    try {
+      if (isFirebaseReady && db && auth) {
+        const roomRef = doc(db, 'rooms', targetRoomId);
+        const roomSnap = await getDoc(roomRef);
+
+        if (!roomSnap.exists()) {
+          alert(`找不到這間房間 [${targetRoomId}]！`);
+          setLoading(false);
+          return;
+        }
+
+        const roomData = roomSnap.data() as Room;
+
+        const playerRef = doc(db, 'rooms', targetRoomId, 'players', playerId);
+        const playerSnap = await getDoc(playerRef);
+
+        if (!playerSnap.exists()) {
+          alert(`該玩家資料不存在！`);
+          setLoading(false);
+          return;
+        }
+
+        try {
+          if (!auth.currentUser) {
+            await signInAnonymously(auth);
+          }
+        } catch (authErr) {
+          console.warn("Auth check on takeover:", authErr);
+        }
+
+        // Set player state online
+        await updateDoc(playerRef, { isOnline: true, connectionId: tabSessionIdRef.current });
+
+        // Save session identification
+        localStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: playerId }));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: playerId }));
+        setCurrentPlayerId(playerId);
+        setRoom(roomData);
+
+        subscribeToRoom(targetRoomId, playerId);
+      } else {
+        // --- LOCAL FALLBACK SANDBOX ENGINE ---
+        const localRoomsRaw = localStorage.getItem('local_monopoly_rooms') || '{}';
+        const localRooms = JSON.parse(localRoomsRaw);
+        const targetRoom = localRooms[targetRoomId];
+
+        if (!targetRoom) {
+          alert(`查無此本地房室 [${targetRoomId}]`);
+          setLoading(false);
+          return;
+        }
+
+        const localPlayersRaw = localStorage.getItem(`local_players_${targetRoomId}`) || '[]';
+        let localPlayers: Player[] = JSON.parse(localPlayersRaw);
+
+        localPlayers = localPlayers.map(p => {
+          if (p.id === playerId) {
+            return { ...p, isOnline: true, connectionId: tabSessionIdRef.current };
+          }
+          return p;
+        });
+
+        localStorage.setItem(`local_players_${targetRoomId}`, JSON.stringify(localPlayers));
+        localStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: playerId }));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ roomId: targetRoomId, playerId: playerId }));
+
+        const localTxsRaw = localStorage.getItem(`local_txs_${targetRoomId}`) || '[]';
+        setTransactions(JSON.parse(localTxsRaw));
+        setPlayers(localPlayers);
+
+        setCurrentPlayerId(playerId);
+        setRoom(targetRoom);
+        
+        if (targetRoom.status === 'playing') {
+          setViewState('game');
+        } else {
+          setViewState('lobby');
+        }
+        setLoading(false);
+      }
+      playUpgradeSound();
+    } catch (err) {
+      console.error("Takeover failed:", err);
+      alert("接續重連失敗，請重新再試一次！");
       setLoading(false);
     }
   };
@@ -997,6 +1149,8 @@ export default function App() {
           <CreateJoinView
             onJoin={handleJoinRoom}
             onCreate={handleCreateRoom}
+            onTakeover={handleTakeoverPlayer}
+            getRoomPlayers={getRoomPlayers}
             initialRoomCode={urlRoomCode}
             isFirebaseReady={isFirebaseReady}
           />

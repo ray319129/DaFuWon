@@ -12,6 +12,7 @@ export interface Player {
   isBanker: boolean;
   isOnline: boolean;
   joinedAt: number; // UTC timestamp
+  connectionId?: string;
 }
 
 export interface Room {

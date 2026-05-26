@@ -4,11 +4,14 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Landmark, ArrowLeft, ArrowRight, Sparkles, Check } from 'lucide-react';
+import { Landmark, ArrowLeft, ArrowRight, Sparkles, Check, RefreshCw, UserCheck } from 'lucide-react';
+import { Player } from '../types';
 
 interface CreateJoinViewProps {
   onJoin: (name: string, avatar: string, color: string, roomIdStr: string) => void;
   onCreate: (name: string, avatar: string, color: string, roomName: string, initialBalance: number) => void;
+  onTakeover: (roomId: string, playerId: string) => void;
+  getRoomPlayers: (roomId: string) => Promise<Player[]>;
   initialRoomCode?: string;
   isFirebaseReady: boolean;
 }
@@ -33,7 +36,7 @@ const COLORS = [
   { name: '橙', value: 'from-orange-500 to-orange-600', ring: 'ring-orange-400', hex: '#F97316' }
 ];
 
-export default function CreateJoinView({ onJoin, onCreate, initialRoomCode, isFirebaseReady }: CreateJoinViewProps) {
+export default function CreateJoinView({ onJoin, onCreate, onTakeover, getRoomPlayers, initialRoomCode, isFirebaseReady }: CreateJoinViewProps) {
   const [mode, setMode] = useState<'decision' | 'create' | 'join'>('decision');
   
   // Player state
@@ -47,6 +50,27 @@ export default function CreateJoinView({ onJoin, onCreate, initialRoomCode, isFi
   
   // Join state
   const [roomIdInput, setRoomIdInput] = useState('');
+  const [existingPlayers, setExistingPlayers] = useState<Player[]>([]);
+  const [isFetchingPlayers, setIsFetchingPlayers] = useState(false);
+
+  // Auto query existing players when roomIdInput reaches 6 digits
+  useEffect(() => {
+    if (roomIdInput.length === 6) {
+      setIsFetchingPlayers(true);
+      getRoomPlayers(roomIdInput)
+        .then((plrs) => {
+          setExistingPlayers(plrs || []);
+          setIsFetchingPlayers(false);
+        })
+        .catch((err) => {
+          console.warn("Error getting player lists for code:", roomIdInput, err);
+          setExistingPlayers([]);
+          setIsFetchingPlayers(false);
+        });
+    } else {
+      setExistingPlayers([]);
+    }
+  }, [roomIdInput, getRoomPlayers]);
 
   // Handle URL auto-fill room query
   useEffect(() => {
@@ -301,6 +325,63 @@ export default function CreateJoinView({ onJoin, onCreate, initialRoomCode, isFi
               onChange={(e) => setRoomIdInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
               className="w-full text-center bg-gray-50 border-2 border-black rounded-xl py-3.5 px-4 font-mono text-2xl font-black tracking-widest text-[#008F4C] focus:outline-none focus:bg-white focus:ring-2 focus:ring-emerald-400"
             />
+
+            {isFetchingPlayers && (
+              <div className="flex items-center justify-center py-2 space-x-2 text-xs text-gray-400 font-mono">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-500" />
+                <span>正在查詢現有玩家名冊...</span>
+              </div>
+            )}
+
+            {!isFetchingPlayers && existingPlayers.length > 0 && (
+              <div className="bg-amber-50/70 border-2 border-dashed border-amber-300 rounded-xl p-3.5 mt-2 space-y-2 transition-all">
+                <div className="flex items-center space-x-1.5 text-xs text-amber-850 font-bold">
+                  <UserCheck className="w-4 h-4 text-amber-700" />
+                  <span>★ 現實中途換人接手 / 重新連線：</span>
+                </div>
+                <p className="text-[11px] text-gray-600 leading-tight">
+                  如果您是中途與朋友換手機、或代碼跑掉需要重連，可以直接點擊「接管」以下玩家，登入並繼承餘額大權：
+                </p>
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  {existingPlayers.map((p) => (
+                    <button
+                      id={`btn-takeover-${p.id}`}
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        let msg = `確認要接管玩家「${p.avatar} ${p.name}」嗎？這會直接進入遊戲並接續他的資金餘額！`;
+                        if (p.isOnline) {
+                          msg = `⚠️ 警告：玩家「${p.avatar} ${p.name}」目前正在另一台手機或裝置上玩（顯示為在線上）！\n\n接管此角色將會直接「強制踢出 / 擠斷線」那個正在玩的人。您確定要將他踢出並取而代之嗎？`;
+                        }
+                        const confirmTakeover = window.confirm(msg);
+                        if (confirmTakeover) {
+                          onTakeover(roomIdInput, p.id);
+                        }
+                      }}
+                      className="flex items-center space-x-2 p-2 rounded-xl border-2 border-black bg-white hover:bg-yellow-50 hover:scale-[1.02] active:scale-[0.98] transition-all text-left shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+                    >
+                      <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center border border-gray-300 text-lg flex-shrink-0">
+                        {p.avatar}
+                      </div>
+                      <div className="truncate min-w-0 flex-grow">
+                        <div className="text-xs font-bold text-black truncate flex items-center justify-between">
+                          <span className="truncate">{p.name}</span>
+                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ml-1 ${p.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'}`} title={p.isOnline ? '在線上' : '離線'}></span>
+                        </div>
+                        <div className="text-[10px] text-gray-500 font-mono tracking-tight flex items-center justify-between mt-0.5">
+                          <span>${p.balance.toLocaleString()}</span>
+                          {p.isOnline && (
+                            <span className="text-[9px] text-emerald-700 bg-emerald-50 border border-emerald-200 px-1 rounded font-bold scale-90 origin-right">
+                              線上
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Player Identity Block */}
