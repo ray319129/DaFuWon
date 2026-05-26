@@ -22,7 +22,7 @@ service cloud.firestore {
       return data.id is string && data.id.size() >= 4 && data.id.size() <= 10
         && data.name is string && data.name.size() <= 100
         && data.initialBalance is number && data.initialBalance >= 0 && data.initialBalance <= 100000000
-        && (data.status == 'lobby' || data.status == 'playing')
+        && (data.status == 'lobby' || data.status == 'playing' || data.status == 'settled')
         && data.bankerPlayerId is string && data.bankerPlayerId.size() <= 128
         && data.createdAt is number
         && data.updatedAt is number;
@@ -89,6 +89,12 @@ service cloud.firestore {
         allow create: if isValidId(roomId) && isValidId(transactionId) && isValidTransaction(incoming());
         allow update: if false;
         allow delete: if false;
+      }
+
+      // ----------------- Backup Restore points -----------------
+      match /backups/{backupId} {
+        allow list, get: if isValidId(roomId);
+        allow create, update, delete: if isValidId(roomId) && isValidId(backupId);
       }
     }
   }

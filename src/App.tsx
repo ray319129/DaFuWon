@@ -19,7 +19,8 @@ import {
   getDocs,
   updateDoc, 
   onSnapshot, 
-  runTransaction 
+  runTransaction,
+  deleteDoc
 } from 'firebase/firestore';
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { Player, Room, Transaction, ViewState, Property } from './types';
@@ -38,6 +39,7 @@ export default function App() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
+  const [backups, setBackups] = useState<any[]>([]);
   const [currentPlayerId, setCurrentPlayerId] = useState<string>('');
   
   const [isFirebaseReady, setIsFirebaseReady] = useState(isFirebaseConfigured);
@@ -180,6 +182,9 @@ export default function App() {
                 localStorage.setItem(`local_properties_${roomId}`, JSON.stringify(initialProps));
                 setProperties(initialProps);
               }
+
+              const localBackupsRaw = localStorage.getItem(`local_backups_${roomId}`) || '[]';
+              setBackups(JSON.parse(localBackupsRaw));
 
               setCurrentPlayerId(playerId);
               setViewState(activeRoom.status === 'lobby' ? 'lobby' : 'game');
@@ -329,6 +334,20 @@ export default function App() {
       console.warn("Properties snapshot warning:", error);
     });
 
+    // E. Subscribe to backups subcollection
+    const backupsRef = collection(db, 'rooms', roomId, 'backups');
+    const unsubBackups = onSnapshot(backupsRef, (snapshot) => {
+      const bList: any[] = [];
+      snapshot.forEach(docSnap => {
+        bList.push(docSnap.data());
+      });
+      // Sort descending by timestamp
+      bList.sort((a, b) => b.timestamp - a.timestamp);
+      setBackups(bList);
+    }, (error) => {
+      console.warn("Backups snapshot warning:", error);
+    });
+
     // Handle offline status mappings
     const handleUnload = () => {
       if (db) {
@@ -344,6 +363,7 @@ export default function App() {
       unsubPlayers();
       unsubTxs();
       unsubProps();
+      unsubBackups();
       window.removeEventListener('beforeunload', handleUnload);
     };
 
@@ -583,11 +603,13 @@ export default function App() {
 
         // Load logs
         const localTxsRaw = localStorage.getItem(`local_txs_${targetRoomId}`) || '[]';
+        const localBackupsRaw = localStorage.getItem(`local_backups_${targetRoomId}`) || '[]';
 
         setCurrentPlayerId(myLocalId);
         setRoom(targetRoom);
         setPlayers(localPlayers);
         setTransactions(JSON.parse(localTxsRaw));
+        setBackups(JSON.parse(localBackupsRaw));
         setViewState(targetRoom.status === 'lobby' ? 'lobby' : 'game');
         setLoading(false);
       }
@@ -696,6 +718,9 @@ export default function App() {
         const localTxsRaw = localStorage.getItem(`local_txs_${targetRoomId}`) || '[]';
         setTransactions(JSON.parse(localTxsRaw));
         
+        const localBackupsRaw = localStorage.getItem(`local_backups_${targetRoomId}`) || '[]';
+        setBackups(JSON.parse(localBackupsRaw));
+        
         const localPropsRaw = localStorage.getItem(`local_properties_${targetRoomId}`);
         if (localPropsRaw) {
           setProperties(JSON.parse(localPropsRaw));
@@ -761,6 +786,8 @@ export default function App() {
     
     const buyer = players.find(p => p.id === currentPlayerId);
     if (!buyer) return;
+
+    await pushBackup(`購買房產：${buyer.name} 買下 [${property.name}]`, players, properties, transactions);
 
     if (buyer.balance < property.price) {
       if (!confirm(`您的現金不足以購買 [${property.name}] ($${property.price}，您只有 $${buyer.balance})，確定要透支扣款以購買此產權嗎？`)) {
@@ -871,6 +898,8 @@ export default function App() {
     const builder = players.find(p => p.id === currentPlayerId);
     if (!builder) return;
 
+    await pushBackup(`增建房產：${builder.name} 升級 ${property.name} 房屋等級`, players, properties, transactions);
+
     if (builder.balance < price) {
       if (!confirm(`您的現金不足以增蓋客房 ($${price}，您只有 $${builder.balance})，確定要透支扣款以蓋房嗎？`)) {
         return;
@@ -968,6 +997,11 @@ export default function App() {
     if (!property) return;
     if (property.ownerId !== currentPlayerId) return;
     if (property.isMortgaged) return;
+
+    const player = players.find(p => p.id === currentPlayerId);
+    if (player) {
+      await pushBackup(`抵押房產：${player.name} 抵押 [${property.name}]`, players, properties, transactions);
+    }
 
     if (property.houses > 0) {
       alert("此地產上蓋有房屋，抵押前必須先將房屋拆除售回（系統會自動將等級重設為0）！");
@@ -1071,6 +1105,8 @@ export default function App() {
     const cost = Math.floor((property.price / 2) * 1.1);
     const builder = players.find(p => p.id === currentPlayerId);
     if (!builder) return;
+
+    await pushBackup(`贖回房產：${builder.name} 贖回 [${property.name}]`, players, properties, transactions);
 
     if (builder.balance < cost) {
       if (!confirm(`您的現金不足以贖回產權 ($${cost}，您只有 $${builder.balance})，確定要透支扣款以贖回嗎？`)) {
@@ -1178,6 +1214,8 @@ export default function App() {
     const payer = players.find(p => p.id === currentPlayerId);
     if (!payer) return;
 
+    await pushBackup(`過路費：${payer.name} 支付 $${rentAmt} 給 ${owner.name}`, players, properties, transactions);
+
     if (payer.balance < rentAmt) {
       if (!confirm(`過路費金額為 $${rentAmt}，您的賬上餘額 ($${payer.balance}) 不足，是否要強制進入「賒帳/負債」透支模式進行扣款？`)) {
         return;
@@ -1267,6 +1305,11 @@ export default function App() {
     const targetUser = players.find(p => p.id === toPlayerId);
     if (!targetUser) return;
 
+    const giver = players.find(p => p.id === currentPlayerId);
+    if (giver) {
+      await pushBackup(`轉撥地產：${giver.name} 將 [${property.name}] 轉送給 ${targetUser.name}`, players, properties, transactions);
+    }
+
     if (!confirm(`確定要把 [${property.name}] 的地產契約產權轉讓給「${targetUser.name}」嗎？`)) {
       return;
     }
@@ -1297,6 +1340,13 @@ export default function App() {
   // 7. Action: P2P TRANSFER (The critical money transfer function!)
   const handleTransfer = async (toPlayerId: string, amount: number) => {
     if (!room) return;
+    
+    const sender = players.find(p => p.id === currentPlayerId);
+    const receiver = players.find(p => p.id === toPlayerId);
+    if (sender && receiver) {
+      await pushBackup(`轉帳資金：${sender.name} 轉帳 $${amount} 給 ${receiver.name}`, players, properties, transactions);
+    }
+
     try {
       if (isFirebaseReady && db) {
         const roomRefId = room.id;
@@ -1388,6 +1438,12 @@ export default function App() {
   // 8. Action: BANK GIVE MONEY
   const handleBankGive = async (playerIdTo: string, amount: number) => {
     if (!room) return;
+
+    const receiver = players.find(p => p.id === playerIdTo);
+    if (receiver) {
+      await pushBackup(`銀行發放：金庫給予 ${receiver.name} $${amount}`, players, properties, transactions);
+    }
+
     try {
       if (isFirebaseReady && db) {
         const roomRefId = room.id;
@@ -1461,6 +1517,12 @@ export default function App() {
   // 9. Action: BANK TAKE MONEY
   const handleBankTake = async (playerIdFrom: string, amount: number) => {
     if (!room) return;
+
+    const sender = players.find(p => p.id === playerIdFrom);
+    if (sender) {
+      await pushBackup(`銀行徵收：向 ${sender.name} 扣收 $${amount}`, players, properties, transactions);
+    }
+
     try {
       if (isFirebaseReady && db) {
         const roomRefId = room.id;
@@ -1534,6 +1596,12 @@ export default function App() {
   // 10. Action: BANK SET AMOUNT (Modify Exact)
   const handleBankSet = async (playerId: string, exactAmount: number) => {
     if (!room) return;
+
+    const targetPlayer = players.find(p => p.id === playerId);
+    if (targetPlayer) {
+      await pushBackup(`修改資金：調整 ${targetPlayer.name} 的財產為 $${exactAmount}`, players, properties, transactions);
+    }
+
     try {
       if (isFirebaseReady && db) {
         const roomRefId = room.id;
@@ -1602,6 +1670,9 @@ export default function App() {
   // 11. Action: RESET GAME (All players back to initialAmount, wipe transactions, clear properties)
   const handleResetGame = async () => {
     if (!room) return;
+
+    await pushBackup(`重置清除：行長初始化遊戲與歸零產權`, players, properties, transactions);
+
     try {
       if (isFirebaseReady && db) {
         const roomRefId = room.id;
@@ -1731,6 +1802,130 @@ export default function App() {
     }
   };
 
+  // 14. Action: Save a history state backup
+  async function pushBackup(actionName: string, currentPlayers: Player[], currentProperties: Property[], currentTransactions: Transaction[]) {
+    if (!room) return;
+    const backupId = 'bak_' + Date.now();
+    const backup = {
+      id: backupId,
+      actionName,
+      timestamp: Date.now(),
+      players: JSON.stringify(currentPlayers),
+      properties: JSON.stringify(currentProperties),
+      transactions: JSON.stringify(currentTransactions)
+    };
+
+    if (isFirebaseReady && db) {
+      try {
+        const backupRef = doc(db, 'rooms', room.id, 'backups', backupId);
+        await setDoc(backupRef, backup);
+
+        // Keep last 10 backups in Firestore
+        const backupsColl = collection(db, 'rooms', room.id, 'backups');
+        const snap = await getDocs(backupsColl);
+        if (snap.size > 10) {
+          const sortedList = snap.docs.map(dDoc => ({
+            ref: dDoc.ref,
+            timestamp: dDoc.data().timestamp || 0
+          })).sort((a, b) => b.timestamp - a.timestamp);
+
+          for (let i = 10; i < sortedList.length; i++) {
+            await deleteDoc(sortedList[i].ref);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to push backup to Firebase:", err);
+      }
+    } else {
+      const key = `local_backups_${room.id}`;
+      const raw = localStorage.getItem(key) || '[]';
+      const list = JSON.parse(raw);
+      list.unshift(backup);
+      if (list.length > 10) {
+        list.splice(10);
+      }
+      localStorage.setItem(key, JSON.stringify(list));
+      setBackups(list);
+    }
+  }
+
+  // 15. Action: Restore a history state backup
+  async function handleRestoreBackup(backupId: string) {
+    if (!room) return;
+    try {
+      let backupToRestore: any = null;
+
+      if (isFirebaseReady && db) {
+        const backupRef = doc(db, 'rooms', room.id, 'backups', backupId);
+        const snap = await getDoc(backupRef);
+        if (snap.exists()) {
+          backupToRestore = snap.data();
+        }
+      } else {
+        const key = `local_backups_${room.id}`;
+        const raw = localStorage.getItem(key) || '[]';
+        const list = JSON.parse(raw);
+        backupToRestore = list.find((b: any) => b.id === backupId);
+      }
+
+      if (!backupToRestore) {
+        alert("⚠️ 錯誤：找不到此紀錄點！");
+        return;
+      }
+
+      const restoredPlrs: Player[] = JSON.parse(backupToRestore.players);
+      const restoredProps: Property[] = JSON.parse(backupToRestore.properties);
+      const restoredTxs: Transaction[] = JSON.parse(backupToRestore.transactions);
+
+      if (isFirebaseReady && db) {
+        // Restore players and properties inside a transaction
+        await runTransaction(db, async (transaction) => {
+          for (const p of restoredPlrs) {
+            const pRef = doc(db, 'rooms', room.id, 'players', p.id);
+            transaction.set(pRef, p);
+          }
+          for (const pr of restoredProps) {
+            const prRef = doc(db, 'rooms', room.id, 'properties', pr.id);
+            transaction.set(prRef, pr);
+          }
+        });
+
+        // Restore transactions (overwrite)
+        const txsColl = collection(db, 'rooms', room.id, 'transactions');
+        const txsSnap = await getDocs(txsColl);
+        await Promise.all(txsSnap.docs.map(tDoc => deleteDoc(tDoc.ref)));
+        await Promise.all(restoredTxs.map(tx => setDoc(doc(db, 'rooms', room.id, 'transactions', tx.id), tx)));
+
+        // Remove the restored backup and all backups newer
+        const backupRef = doc(db, 'rooms', room.id, 'backups', backupId);
+        await deleteDoc(backupRef);
+      } else {
+        localStorage.setItem(`local_players_${room.id}`, JSON.stringify(restoredPlrs));
+        localStorage.setItem(`local_properties_${room.id}`, JSON.stringify(restoredProps));
+        localStorage.setItem(`local_txs_${room.id}`, JSON.stringify(restoredTxs));
+
+        const key = `local_backups_${room.id}`;
+        const raw = localStorage.getItem(key) || '[]';
+        let list = JSON.parse(raw);
+        const itemIdx = list.findIndex((b: any) => b.id === backupId);
+        if (itemIdx !== -1) {
+          list.splice(0, itemIdx + 1);
+        }
+        localStorage.setItem(key, JSON.stringify(list));
+
+        setPlayers(restoredPlrs);
+        setProperties(restoredProps);
+        setTransactions(restoredTxs);
+        setBackups(list);
+      }
+
+      alert(`✅ 已成功回滾到上一步：${backupToRestore.actionName}`);
+    } catch (err) {
+      console.error("Restore backup failed:", err);
+      alert("❌ 回滾失敗，請檢查系統或紀錄完整性。");
+    }
+  }
+
   // Leave active room context
   const handleLeaveRoom = async () => {
     // Clean up active Firestore subscribers immediately
@@ -1854,6 +2049,8 @@ export default function App() {
             onTransferDeed={handleTransferPropertyDeed}
             onSettleGame={handleSettleGame}
             onResumeGame={handleResumeGame}
+            backups={backups}
+            onRestoreBackup={handleRestoreBackup}
           />
         )}
       </main>

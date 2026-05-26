@@ -52,6 +52,8 @@ interface GameViewProps {
   onTransferDeed: (propertyId: string, toPlayerId: string) => void;
   onSettleGame: () => void;
   onResumeGame: () => void;
+  backups: any[];
+  onRestoreBackup: (backupId: string) => void;
 }
 
 export default function GameView({
@@ -74,7 +76,9 @@ export default function GameView({
   onPayRent,
   onTransferDeed,
   onSettleGame,
-  onResumeGame
+  onResumeGame,
+  backups = [],
+  onRestoreBackup
 }: GameViewProps) {
   const [activeTab, setActiveTab] = useState<'account' | 'properties' | 'trends' | 'leaderboard' | 'banker'>('account');
   
@@ -872,6 +876,8 @@ export default function GameView({
               onBankSet={onBankSet}
               onResetGame={onResetGame}
               onSettleGame={onSettleGame}
+              backups={backups}
+              onRestoreBackup={onRestoreBackup}
             />
           ) : (
             <div className="bg-white border-4 border-black rounded-2xl p-6 shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] text-center py-10 space-y-3">

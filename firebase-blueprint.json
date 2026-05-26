@@ -19,7 +19,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["lobby", "playing"],
+          "enum": ["lobby", "playing", "settled"],
           "description": "The current game stage."
         },
         "bankerPlayerId": {
@@ -117,6 +117,38 @@
         }
       },
       "required": ["id", "fromId", "fromName", "toId", "toName", "amount", "type", "timestamp"]
+    },
+    "BackupState": {
+      "title": "BackupState",
+      "description": "Backup checkpoint containing snapshots of players, properties, and transaction ledger at a given moment.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id for this backup."
+        },
+        "actionName": {
+          "type": "string",
+          "description": "Name of the action recorded."
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Millisecond unix timestamp."
+        },
+        "players": {
+          "type": "string",
+          "description": "JSON string representing the players list."
+        },
+        "properties": {
+          "type": "string",
+          "description": "JSON string representing the properties list."
+        },
+        "transactions": {
+          "type": "string",
+          "description": "JSON string representing the transactions list."
+        }
+      },
+      "required": ["id", "actionName", "timestamp", "players", "properties", "transactions"]
     }
   },
   "firestore": {
@@ -131,6 +163,10 @@
     "/rooms/{roomId}/transactions/{transactionId}": {
       "schema": "Transaction",
       "description": "Audit-logged micro-transactions synced multi-client for display."
+    },
+    "/rooms/{roomId}/backups/{backupId}": {
+      "schema": "BackupState",
+      "description": "History checkpoints of players, properties, and transactions configuration for undo mechanism."
     }
   }
 }

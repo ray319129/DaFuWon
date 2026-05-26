@@ -16,6 +16,8 @@ interface BankerDashboardProps {
   onBankSet: (playerId: string, exactAmount: number) => void;
   onResetGame: () => void;
   onSettleGame: () => void;
+  backups: any[];
+  onRestoreBackup: (backupId: string) => void;
 }
 
 export default function BankerDashboard({
@@ -25,7 +27,9 @@ export default function BankerDashboard({
   onBankTake,
   onBankSet,
   onResetGame,
-  onSettleGame
+  onSettleGame,
+  backups = [],
+  onRestoreBackup
 }: BankerDashboardProps) {
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [amountStr, setAmountStr] = useState('');
@@ -315,6 +319,60 @@ export default function BankerDashboard({
           >
             <span>🏁 啟動手動結算，結算全盤資產 ➔</span>
           </button>
+        </div>
+
+        {/* Undo backups list */}
+        <div className="bg-slate-50 border-2 border-slate-300 rounded-2xl p-4 space-y-3 shadow-[1px_1px_0px_0px_rgba(0,0,0,0.1)]">
+          <div className="flex items-start space-x-2">
+            <ShieldCheck className="w-5 h-5 text-slate-700 mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-extrabold text-slate-950 block">🎮 行長防護：備份與回滾 (最後 10 次動作)</span>
+              <span className="text-[10px] text-slate-600 block mt-0.5 leading-relaxed">
+                每次金流及地產更動時系統皆會自動備份，點選下方動作行即可回復到該操作前的整盤狀態。
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+            {backups.length === 0 ? (
+              <p className="text-[10px] text-gray-500 text-center py-4 bg-white rounded-xl border border-dashed border-gray-200">
+                目前尚無可倒回之備份操作
+              </p>
+            ) : (
+              backups.map((bk, idx) => {
+                const bkTime = new Date(bk.timestamp).toLocaleTimeString('zh-TW', { hour12: false });
+                return (
+                  <div key={bk.id} className="bg-white border-2 border-gray-150 rounded-xl p-2 flex items-center justify-between space-x-2 hover:border-slate-300 transition-all">
+                    <div className="space-y-0.5 min-w-0 flex-1">
+                      <div className="flex items-center space-x-1">
+                        <span className="text-[9px] font-mono leading-none py-0.5 px-1 bg-slate-100 font-black text-slate-500 rounded">
+                          #{idx + 1}
+                        </span>
+                        <span className="text-[9px] font-mono text-gray-400">
+                          {bkTime}
+                        </span>
+                      </div>
+                      <p className="text-[11px] font-black text-gray-800 truncate">
+                        {bk.actionName}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm(`確定要把遊戲整盤回滾到「${bk.actionName}」之前嗎？所有人資金與產權將完全重置回當時狀態。`)) {
+                          onRestoreBackup(bk.id);
+                        }
+                      }}
+                      className="shrink-0 bg-slate-850 hover:bg-slate-900 border-2 border-black text-white font-extrabold text-[10px] py-1 px-2.5 rounded-lg shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] active:translate-y-[1px] active:shadow-none transition-all cursor-pointer"
+                    >
+                      ⏪ 回滾
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
 
         {showResetConfirm ? (
